@@ -1,0 +1,58 @@
+{
+  "backtest_id": "927ce2ef-5be9-4972-b3ed-8794811fa173",
+  "config": {
+    "strategy_id": "buy-index-test",
+    "strategy_type": "jqdata",
+    "symbol": "000300.SH",
+    "start_date": "2026-01-01",
+    "end_date": "2026-01-10",
+    "timeframe": "1d",
+    "initial_cash": 100000.0,
+    "commission": 0.00025,
+    "slippage": 0.001,
+    "parameters": {}
+  },
+  "created_at": "2026-03-18T15:47:35.724686",
+  "metrics": {
+    "total_return": 0.0,
+    "annual_return": 0.0,
+    "max_drawdown": 0.0,
+    "max_drawdown_duration": 0.0,
+    "sharpe_ratio": 0,
+    "win_rate": 0,
+    "profit_factor": 0.0,
+    "total_trades": 0,
+    "winning_trades": 0,
+    "losing_trades": 0
+  },
+  "equity_curve": [
+    {
+      "date": "2026-01-05T00:00:00",
+      "value": 1.0
+    },
+    {
+      "date": "2026-01-06T00:00:00",
+      "value": 1.0
+    },
+    {
+      "date": "2026-01-07T00:00:00",
+      "value": 1.0
+    },
+    {
+      "date": "2026-01-08T00:00:00",
+      "value": 1.0
+    },
+    {
+      "date": "2026-01-09T00:00:00",
+      "value": 1.0
+    }
+  ],
+  "trades": [],
+  "drawdown": {
+    "max_drawdown": 0.0,
+    "max_drawdown_len": 0.0,
+    "max_drawdown_start": "",
+    "max_drawdown_end": ""
+  },
+  "logs": []
+}

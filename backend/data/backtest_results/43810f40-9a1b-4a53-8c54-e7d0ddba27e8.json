@@ -1,0 +1,58 @@
+{
+  "backtest_id": "43810f40-9a1b-4a53-8c54-e7d0ddba27e8",
+  "config": {
+    "strategy_id": "test-simple-strategy",
+    "strategy_type": "jqdata",
+    "symbol": null,
+    "start_date": "2026-01-01",
+    "end_date": "2026-01-10",
+    "timeframe": "1d",
+    "initial_cash": 100000.0,
+    "commission": 0.00025,
+    "slippage": 0.001,
+    "parameters": {}
+  },
+  "created_at": "2026-03-18T15:14:52.780030",
+  "metrics": {
+    "total_return": 0.0,
+    "annual_return": 0.0,
+    "max_drawdown": 0.0,
+    "max_drawdown_duration": 0.0,
+    "sharpe_ratio": 0,
+    "win_rate": 0,
+    "profit_factor": 0.0,
+    "total_trades": 0,
+    "winning_trades": 0,
+    "losing_trades": 0
+  },
+  "equity_curve": [
+    {
+      "date": "2026-01-05T00:00:00",
+      "value": 1.0
+    },
+    {
+      "date": "2026-01-06T00:00:00",
+      "value": 1.0
+    },
+    {
+      "date": "2026-01-07T00:00:00",
+      "value": 1.0
+    },
+    {
+      "date": "2026-01-08T00:00:00",
+      "value": 1.0
+    },
+    {
+      "date": "2026-01-09T00:00:00",
+      "value": 1.0
+    }
+  ],
+  "trades": [],
+  "drawdown": {
+    "max_drawdown": 0.0,
+    "max_drawdown_len": 0.0,
+    "max_drawdown_start": "",
+    "max_drawdown_end": ""
+  },
+  "logs": []
+}

@@ -1,0 +1,174 @@
+{
+  "backtest_id": "1b0c5e87-8a8e-4a2f-a62b-dff0828792b6",
+  "config": {
+    "strategy_id": "test-simple-strategy",
+    "strategy_type": "jqdata",
+    "symbol": "000300.SH",
+    "start_date": "2026-01-01",
+    "end_date": "2026-03-01",
+    "timeframe": "1d",
+    "initial_cash": 100000.0,
+    "commission": 0.00025,
+    "slippage": 0.001,
+    "parameters": {}
+  },
+  "created_at": "2026-03-18T15:07:39.602692",
+  "metrics": {
+    "total_return": 0.0,
+    "annual_return": 0.0,
+    "max_drawdown": 0.0,
+    "max_drawdown_duration": 0.0,
+    "sharpe_ratio": 0,
+    "win_rate": 0,
+    "profit_factor": 0.0,
+    "total_trades": 0,
+    "winning_trades": 0,
+    "losing_trades": 0
+  },
+  "equity_curve": [
+    {
+      "date": "2026-01-05T00:00:00",
+      "value": 1.0
+    },
+    {
+      "date": "2026-01-06T00:00:00",
+      "value": 1.0
+    },
+    {
+      "date": "2026-01-07T00:00:00",
+      "value": 1.0
+    },
+    {
+      "date": "2026-01-08T00:00:00",
+      "value": 1.0
+    },
+    {
+      "date": "2026-01-09T00:00:00",
+      "value": 1.0
+    },
+    {
+      "date": "2026-01-12T00:00:00",
+      "value": 1.0
+    },
+    {
+      "date": "2026-01-13T00:00:00",
+      "value": 1.0
+    },
+    {
+      "date": "2026-01-14T00:00:00",
+      "value": 1.0
+    },
+    {
+      "date": "2026-01-15T00:00:00",
+      "value": 1.0
+    },
+    {
+      "date": "2026-01-16T00:00:00",
+      "value": 1.0
+    },
+    {
+      "date": "2026-01-19T00:00:00",
+      "value": 1.0
+    },
+    {
+      "date": "2026-01-20T00:00:00",
+      "value": 1.0
+    },
+    {
+      "date": "2026-01-21T00:00:00",
+      "value": 1.0
+    },
+    {
+      "date": "2026-01-22T00:00:00",
+      "value": 1.0
+    },
+    {
+      "date": "2026-01-23T00:00:00",
+      "value": 1.0
+    },
+    {
+      "date": "2026-01-26T00:00:00",
+      "value": 1.0
+    },
+    {
+      "date": "2026-01-27T00:00:00",
+      "value": 1.0
+    },
+    {
+      "date": "2026-01-28T00:00:00",
+      "value": 1.0
+    },
+    {
+      "date": "2026-01-29T00:00:00",
+      "value": 1.0
+    },
+    {
+      "date": "2026-01-30T00:00:00",
+      "value": 1.0
+    },
+    {
+      "date": "2026-02-02T00:00:00",
+      "value": 1.0
+    },
+    {
+      "date": "2026-02-03T00:00:00",
+      "value": 1.0
+    },
+    {
+      "date": "2026-02-04T00:00:00",
+      "value": 1.0
+    },
+    {
+      "date": "2026-02-05T00:00:00",
+      "value": 1.0
+    },
+    {
+      "date": "2026-02-06T00:00:00",
+      "value": 1.0
+    },
+    {
+      "date": "2026-02-09T00:00:00",
+      "value": 1.0
+    },
+    {
+      "date": "2026-02-10T00:00:00",
+      "value": 1.0
+    },
+    {
+      "date": "2026-02-11T00:00:00",
+      "value": 1.0
+    },
+    {
+      "date": "2026-02-12T00:00:00",
+      "value": 1.0
+    },
+    {
+      "date": "2026-02-13T00:00:00",
+      "value": 1.0
+    },
+    {
+      "date": "2026-02-24T00:00:00",
+      "value": 1.0
+    },
+    {
+      "date": "2026-02-25T00:00:00",
+      "value": 1.0
+    },
+    {
+      "date": "2026-02-26T00:00:00",
+      "value": 1.0
+    },
+    {
+      "date": "2026-02-27T00:00:00",
+      "value": 1.0
+    }
+  ],
+  "trades": [],
+  "drawdown": {
+    "max_drawdown": 0.0,
+    "max_drawdown_len": 0.0,
+    "max_drawdown_start": "",
+    "max_drawdown_end": ""
+  },
+  "logs": []
+}
