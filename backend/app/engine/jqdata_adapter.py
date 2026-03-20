@@ -5,12 +5,108 @@
 """
 import pandas as pd
 import numpy as np
+import re
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from typing import Dict, List, Optional, Union, Any
 from dataclasses import dataclass, field
 
 from app.db.session import db_manager
+
+# 兼容旧版 pandas DataFrame.append（新版已移除）
+if not hasattr(pd.DataFrame, 'append'):
+    def _df_append(self, other, ignore_index=False, verify_integrity=False, sort=False):
+        # 保存原始列的dtype（避免date object被转成datetime64）
+        dtypes = self.dtypes.to_dict()
+        result = pd.concat([self, other], ignore_index=ignore_index, sort=sort)
+        # 恢复object类型的列（避免date被转换成datetime64）
+        for col, dtype in dtypes.items():
+            if dtype == object and col in result.columns:
+                try:
+                    result[col] = result[col].astype(object)
+                except Exception:
+                    pass
+        return result
+    pd.DataFrame.append = _df_append
+
+
+# ============================================================================
+# 股票代码格式转换工具
+# ============================================================================
+
+def normalize_code(code: str) -> str:
+    """
+    将聚宽股票代码格式转换为Tushare格式
+
+    聚宽格式:
+        - 上海证券交易所: 600519.XSHG
+        - 深圳证券交易所: 000001.XSHE
+    Tushare格式:
+        - 上海证券交易所: 600519.SH
+        - 深圳证券交易所: 000001.SZ
+
+    Args:
+        code: 股票代码（支持聚宽或Tushare格式）
+
+    Returns:
+        Tushare格式的股票代码
+    """
+    if not code:
+        return code
+
+    # 已经是Tushare格式
+    if code.endswith('.SH') or code.endswith('.SZ'):
+        return code
+
+    # 聚宽格式转换
+    if code.endswith('.XSHG'):
+        return code.replace('.XSHG', '.SH')
+    elif code.endswith('.XSHE'):
+        return code.replace('.XSHE', '.SZ')
+
+    # 无后缀格式，根据数字判断
+    # 6开头为上海，0/3开头为深圳
+    if code.startswith('6'):
+        return f"{code}.SH"
+    elif code.startswith('0') or code.startswith('3'):
+        return f"{code}.SZ"
+
+    # 无法识别，原样返回
+    return code
+
+
+def normalize_code_list(codes: List[str]) -> List[str]:
+    """
+    批量转换股票代码格式
+
+    Args:
+        codes: 股票代码列表
+
+    Returns:
+        转换后的代码列表
+    """
+    return [normalize_code(c) for c in codes]
+
+
+def to_jq_code(code: str) -> str:
+    """
+    将Tushare格式转换为聚宽格式
+
+    Args:
+        code: Tushare格式代码
+
+    Returns:
+        聚宽格式代码
+    """
+    if not code:
+        return code
+
+    if code.endswith('.SH'):
+        return code.replace('.SH', '.XSHG')
+    elif code.endswith('.SZ'):
+        return code.replace('.SZ', '.XSHE')
+
+    return code
 
 
 # ============================================================================
@@ -285,6 +381,8 @@ def get_all_securities(types=None, date=None) -> pd.DataFrame:
                market, exchange, list_status, list_date, delist_date, is_hs
         FROM stocks
         WHERE list_status = 'L'
+          AND ts_code NOT LIKE '%.BJ'
+          AND ts_code NOT LIKE '688%'
     """
 
     df = db.execute(query).fetchdf()
@@ -358,7 +456,12 @@ def get_current_data() -> Dict[str, CurrentData]:
 
         result[ts_code] = data
 
-    return result
+    # 返回带默认值的字典，访问不存在的股票时返回停牌的CurrentData
+    class _DefaultCurrentData(dict):
+        def __missing__(self, key):
+            return CurrentData(paused=True, is_st=False, name='')
+
+    return _DefaultCurrentData(result)
 
 
 def get_price(security, start_date=None, end_date=None,
@@ -367,7 +470,7 @@ def get_price(security, start_date=None, end_date=None,
     获取历史价格数据
 
     Args:
-        security: 股票代码或列表
+        security: 股票代码或列表（支持聚宽格式 .XSHG/.XSHE 或 Tushare格式 .SH/.SZ）
         start_date: 开始日期
         end_date: 结束日期
         frequency: 频率，如 'daily', 'minute'
@@ -378,6 +481,12 @@ def get_price(security, start_date=None, end_date=None,
         DataFrame
     """
     db = db_manager.get_connection()
+
+    # 转换股票代码格式
+    if isinstance(security, list):
+        security = normalize_code_list(security)
+    else:
+        security = normalize_code(security)
 
     # 处理日期
     if count is not None and end_date is not None:
@@ -397,7 +506,9 @@ def get_price(security, start_date=None, end_date=None,
         'low': 'low',
         'volume': 'vol',
         'money': 'amount',
-        'pre_close': 'pre_close'
+        'pre_close': 'pre_close',
+        'high_limit': 'high_limit',
+        'low_limit': 'low_limit'
     }
 
     sql_fields = ['trade_date', 'ts_code']
@@ -407,6 +518,8 @@ def get_price(security, start_date=None, end_date=None,
 
     # 处理多股票
     if isinstance(security, list):
+        if not security:
+            return pd.DataFrame()
         placeholders = ','.join(['?' for _ in security])
         stock_filter = f"ts_code IN ({placeholders})"
         params = security.copy()
@@ -443,6 +556,23 @@ def get_price(security, start_date=None, end_date=None,
     return df
 
 
+class _JQSeries(pd.Series):
+    """兼容聚宽的Series，支持负数位置索引（如 series[-1]）"""
+    def __getitem__(self, key):
+        if isinstance(key, int) and key < 0:
+            return self.iloc[key]
+        return super().__getitem__(key)
+
+
+class _JQDataFrame(pd.DataFrame):
+    """兼容聚宽的DataFrame，列访问返回_JQSeries"""
+    def __getitem__(self, key):
+        result = super().__getitem__(key)
+        if isinstance(result, pd.Series):
+            return _JQSeries(result)
+        return result
+
+
 def history(count, unit='1d', field='close', security_list=None,
             skip_paused=True, frequency='daily') -> pd.DataFrame:
     """
@@ -452,7 +582,7 @@ def history(count, unit='1d', field='close', security_list=None,
         count: 获取条数
         unit: 时间单位，如 '1d', '1m'
         field: 字段，如 'close', 'open', 'high', 'low', 'volume', 'money'
-        security_list: 股票代码列表
+        security_list: 股票代码列表（支持聚宽格式 .XSHG/.XSHE 或 Tushare格式 .SH/.SZ）
         skip_paused: 是否跳过停牌
         frequency: 频率
 
@@ -470,6 +600,9 @@ def history(count, unit='1d', field='close', security_list=None,
         # 获取所有股票
         securities = get_all_securities()
         security_list = securities.index.tolist()[:50]  # 限制数量
+    else:
+        # 转换代码格式
+        security_list = normalize_code_list(security_list)
 
     # 获取数据
     data = get_price(
@@ -483,9 +616,14 @@ def history(count, unit='1d', field='close', security_list=None,
     # 转换为宽格式
     if not data.empty and 'ts_code' in data.columns:
         result = data.pivot(columns='ts_code', values=field)
-        return result
+        # 确保所有请求的股票都有列（缺失的填NaN）
+        for s in security_list:
+            if s not in result.columns:
+                result[s] = float('nan')
+        return _JQDataFrame(result)
 
-    return data
+    # 返回空DataFrame但包含所有请求列
+    return _JQDataFrame(pd.DataFrame(columns=security_list))
 
 
 def attribute_history(security, count, unit='1d',
@@ -495,7 +633,7 @@ def attribute_history(security, count, unit='1d',
     获取单只股票历史数据
 
     Args:
-        security: 股票代码
+        security: 股票代码（支持聚宽格式 .XSHG/.XSHE 或 Tushare格式 .SH/.SZ）
         count: 条数
         unit: 时间单位
         fields: 字段列表
@@ -505,6 +643,9 @@ def attribute_history(security, count, unit='1d',
     Returns:
         DataFrame
     """
+    # 转换代码格式
+    security = normalize_code(security)
+
     return get_price(
         security=security,
         count=count,
@@ -522,7 +663,7 @@ def order(security, amount, style=None, side='long', pindex=0):
     下单
 
     Args:
-        security: 股票代码
+        security: 股票代码（支持聚宽格式 .XSHG/.XSHE 或 Tushare格式 .SH/.SZ）
         amount: 数量（正买负卖）
         style: 下单风格
         side: 多空方向
@@ -536,6 +677,9 @@ def order(security, amount, style=None, side='long', pindex=0):
     if 'context' not in globals() or context._broker is None:
         log.error("未在回测环境中")
         return None
+
+    # 转换代码格式
+    security = normalize_code(security)
 
     try:
         # 通过backtrader下单
@@ -564,6 +708,109 @@ def order(security, amount, style=None, side='long', pindex=0):
 
 
 def order_value(security, value, style=None, side='long', pindex=0):
+    """
+    按金额下单
+
+    Args:
+        security: 股票代码（支持聚宽格式 .XSHG/.XSHE 或 Tushare格式 .SH/.SZ）
+        value: 金额（正买负卖）
+        style: 下单风格
+        side: 多空方向
+        pindex: 子账户索引
+    """
+    global context
+
+    if 'context' not in globals():
+        return None
+
+    # 转换代码格式
+    security = normalize_code(security)
+
+    # 获取当前价格
+    current_data = get_current_data()
+    if security not in current_data:
+        log.error(f"无法获取 {security} 价格")
+        return None
+
+    price = current_data[security].last_price
+    if price <= 0:
+        return None
+
+    # 计算股数（100股整数）
+    amount = int(value / price / 100) * 100
+    if value < 0:
+        amount = -amount
+
+    return order(security, amount, style, side, pindex)
+
+
+def order_target(security, amount, style=None, side='long', pindex=0):
+    """
+    目标持仓下单
+
+    Args:
+        security: 股票代码（支持聚宽格式 .XSHG/.XSHE 或 Tushare格式 .SH/.SZ）
+        amount: 目标持仓数量
+        style: 下单风格
+        side: 多空方向
+        pindex: 子账户索引
+    """
+    global context
+
+    if 'context' not in globals():
+        return None
+
+    # 转换代码格式
+    security = normalize_code(security)
+
+    # 获取当前持仓
+    current_amount = 0
+    if security in context.portfolio.positions:
+        current_amount = context.portfolio.positions[security].total_amount
+
+    # 计算需要调整的数量
+    delta = amount - current_amount
+
+    if delta != 0:
+        return order(security, delta, style, side, pindex)
+    return None
+
+
+def order_target_value(security, value, style=None, side='long', pindex=0):
+    """
+    目标市值下单
+
+    Args:
+        security: 股票代码（支持聚宽格式 .XSHG/.XSHE 或 Tushare格式 .SH/.SZ）
+        value: 目标市值
+        style: 下单风格
+        side: 多空方向
+        pindex: 子账户索引
+    """
+    global context
+
+    if 'context' not in globals():
+        return None
+
+    # 转换代码格式
+    security = normalize_code(security)
+
+    # 获取当前价格
+    current_data = get_current_data()
+    if security not in current_data:
+        return None
+
+    price = current_data[security].last_price
+    if price <= 0:
+        return None
+
+    # 计算目标股数
+    target_amount = int(value / price / 100) * 100
+
+    return order_target(security, target_amount, style, side, pindex)
+
+
+# 删除旧的函数定义（下方重复的代码）
     """
     按金额下单
 
@@ -657,6 +904,65 @@ def order_target_value(security, value, style=None, side='long', pindex=0):
     return order_target(security, target_amount, style, side, pindex)
 
 
+def _eval_expr_on_df(expr, df):
+    """在DataFrame上对QueryField/QueryExpr求值"""
+    if isinstance(expr, QueryField):
+        return df[expr.name] if expr.name in df.columns else None
+    elif isinstance(expr, QueryExpr):
+        left = _eval_expr_on_df(expr.left, df)
+        right = _eval_expr_on_df(expr.right, df)
+        if left is None or right is None:
+            return None
+        if expr.op == '/':
+            return left / right
+        elif expr.op == '*':
+            return left * right
+        elif expr.op == '+':
+            return left + right
+        elif expr.op == '-':
+            return left - right
+    elif isinstance(expr, (int, float)):
+        return expr
+    return None
+
+
+def _apply_filter_conditions_on_df(df, filter_conditions):
+    """在DataFrame上应用过滤条件列表（每项为(left, op, right)元组或QueryCondition）"""
+    mask = pd.Series([True] * len(df), index=df.index)
+    for cond in filter_conditions:
+        if isinstance(cond, tuple):
+            col_name, op, val = cond
+            if col_name not in df.columns:
+                continue
+            series = df[col_name]
+        else:
+            # QueryCondition对象
+            series = _eval_expr_on_df(cond.left, df)
+            if series is None:
+                continue
+            op = cond.op
+            val = cond.right
+
+        try:
+            if op == 'gt':
+                mask &= series > val
+            elif op == 'ge':
+                mask &= series >= val
+            elif op == 'lt':
+                mask &= series < val
+            elif op == 'le':
+                mask &= series <= val
+            elif op == 'eq':
+                mask &= series == val
+            elif op == 'between':
+                mask &= (series >= val[0]) & (series <= val[1])
+            elif op == 'in':
+                mask &= series.isin(val)
+        except Exception:
+            pass
+    return df[mask].reset_index(drop=True)
+
+
 def get_fundamentals(query_obj, date=None, statDate=None):
     """
     查询财务数据
@@ -671,27 +977,108 @@ def get_fundamentals(query_obj, date=None, statDate=None):
     """
     db = db_manager.get_connection()
 
+    # 早期返回：空stocks列表
+    if hasattr(query_obj, '_filter'):
+        for f in query_obj._filter:
+            if hasattr(f, 'left') and hasattr(f, 'right') and hasattr(f, 'op'):
+                left = f.left
+                if hasattr(left, 'name') and left.name == 'code' and f.op == 'in':
+                    right = f.right
+                    codes_check = right.value if hasattr(right, 'value') else right
+                    if isinstance(codes_check, list) and len(codes_check) == 0:
+                        return pd.DataFrame()
+
     # 从query_obj提取信息
     codes = None
-    filters = {}
+    entities = []
+    filter_conditions = []  # 存储QueryCondition对象
+    simple_filter_conditions = []  # 存储(col, op, val)简单元组
 
     if hasattr(query_obj, '_entities'):
-        # 提取查询的实体（valuation, indicator等）
         entities = query_obj._entities
-    else:
-        entities = ['valuation', 'indicator']
 
     if hasattr(query_obj, '_filter'):
-        # 简化处理：解析filter中的条件
         for f in query_obj._filter:
-            # 尝试提取code.in_条件
-            if hasattr(f, 'left') and hasattr(f, 'right'):
-                if hasattr(f.left, 'name') and f.left.name == 'code':
-                    if hasattr(f.right, 'value'):
-                        codes = f.right.value
+            if not hasattr(f, 'left') or not hasattr(f, 'right'):
+                continue
+            left = f.left
+            # code.in_() 条件
+            if hasattr(left, 'name') and left.name == 'code' and f.op == 'in':
+                right = f.right
+                if hasattr(right, 'value'):
+                    codes = right.value
+                elif isinstance(right, list):
+                    codes = right
+            # 简单字段条件（非表达式）
+            elif isinstance(left, QueryField):
+                simple_filter_conditions.append((left.name, f.op, f.right))
+            # 表达式条件（如 pe_ratio / inc_net_profit_year_on_year > 0.08）
+            elif isinstance(left, QueryExpr):
+                filter_conditions.append(f)
 
-    # 构建查询
-    # 从stock_daily_basic获取估值数据
+    # 转换代码格式
+    if codes:
+        if isinstance(codes, str):
+            codes = [codes]
+        codes = normalize_code_list(codes)
+
+    # 判断查询类型：看是否包含 indicator 实体
+    need_valuation = False
+    need_indicator = False
+    for entity in entities:
+        if isinstance(entity, IndicatorTable):
+            need_indicator = True
+        elif isinstance(entity, ValuationTable):
+            need_valuation = True
+        elif hasattr(entity, 'table'):
+            if entity.table == 'indicator':
+                need_indicator = True
+            elif entity.table == 'valuation':
+                need_valuation = True
+
+    # 将简单过滤条件分给对应的表
+    val_filter = [(col, op, val) for col, op, val in simple_filter_conditions
+                  if col in ('pe_ratio', 'pb_ratio', 'ps_ratio', 'market_cap', 'circulating_market_cap')]
+    ind_filter = [(col, op, val) for col, op, val in simple_filter_conditions
+                  if col not in ('pe_ratio', 'pb_ratio', 'ps_ratio', 'market_cap',
+                                 'circulating_market_cap', 'code')]
+
+    # 获取两个表的数据并合并
+    if need_indicator and need_valuation:
+        # 联合查询：先获取valuation，再merge indicator
+        val_df = _get_valuation_fundamentals(db, codes, date)
+        if val_df.empty:
+            return val_df
+        ind_df = _get_indicator_fundamentals(db, list(val_df['code']), date, [])
+        if not ind_df.empty:
+            df = val_df.merge(
+                ind_df[['code'] + [c for c in ind_df.columns if c not in val_df.columns]],
+                on='code', how='left'
+            )
+        else:
+            df = val_df
+    elif need_indicator:
+        df = _get_indicator_fundamentals(db, codes, date, [])
+    else:
+        df = _get_valuation_fundamentals(db, codes, date)
+
+    if df.empty:
+        return df
+
+    # 应用所有简单过滤条件
+    all_simple = val_filter + ind_filter
+    if all_simple:
+        df = _apply_filter_conditions_on_df(df, all_simple)
+
+    # 应用表达式过滤条件
+    if filter_conditions and not df.empty:
+        df = _apply_filter_conditions_on_df(df, filter_conditions)
+
+    return df
+
+
+def _get_valuation_fundamentals(db, codes, date):
+    """获取估值数据"""
     if codes:
         placeholders = ','.join(['?' for _ in codes])
         where_clause = f"WHERE ts_code IN ({placeholders})"
@@ -704,9 +1091,9 @@ def get_fundamentals(query_obj, date=None, statDate=None):
         where_clause += " AND trade_date <= ?"
         params.append(date)
 
-    # 获取最新数据
+    # 获取最新数据，按ts_code分组取最新
     query = f"""
-        SELECT
+        SELECT DISTINCT ON (ts_code)
             ts_code as code,
             pe as pe_ratio,
             pb as pb_ratio,
@@ -715,48 +1102,196 @@ def get_fundamentals(query_obj, date=None, statDate=None):
             circ_mv as circulating_market_cap
         FROM stock_daily_basic
         {where_clause}
-        ORDER BY trade_date DESC
+        ORDER BY ts_code, trade_date DESC
     """
 
     try:
         df = db.execute(query, params).fetchdf()
         return df
     except Exception as e:
-        log.error(f"get_fundamentals查询失败: {e}")
+        log.error(f"get_fundamentals valuation查询失败: {e}")
         return pd.DataFrame()
 
 
-def get_security_info(code):
+def _get_indicator_fundamentals(db, codes, date, filter_conditions):
     """
-    获取证券信息
+    获取财务指标数据，包含同比增长率计算
 
-    Args:
-        code: 股票代码
-
-    Returns:
-        SimpleNamespace对象，包含display_name, start_date等属性
+    注意：由于Tushare的fina_indicator表没有直接的同比增长率字段，
+    这里需要通过计算得到
     """
-    db = db_manager.get_connection()
+    if codes:
+        placeholders = ','.join(['?' for _ in codes])
+        where_clause = f"WHERE ts_code IN ({placeholders})"
+        params = codes.copy()
+    else:
+        where_clause = "WHERE 1=1"
+        params = []
+
+    if date:
+        # 转换为日期对象
+        if isinstance(date, str):
+            query_date = datetime.strptime(date, '%Y-%m-%d').date()
+        else:
+            query_date = date
+        # 允许最多往前查6个月的财务数据（在回测中财务数据通常有延迟披露）
+        # 同时向后宽松180天：财务数据按季度披露，允许使用最近已公布的季报
+        # 这样在2025-01-02查询时，可以找到2025-03-31的季报数据（已同步到数据库）
+        date_upper = (query_date + timedelta(days=180)).strftime('%Y-%m-%d')
+        where_clause += " AND end_date <= ?"
+        params.append(date_upper)
+    else:
+        date_upper = None
 
     try:
-        row = db.execute(
-            """SELECT ts_code, name, symbol, list_date, industry, market
-               FROM stocks WHERE ts_code = ?""",
-            [code]
-        ).fetchone()
+        # 获取最新一期的财务数据
+        query_current = f"""
+            SELECT
+                ts_code as code,
+                end_date,
+                roe,
+                roe_yearly,
+                bps,
+                eps,
+                dt_eps,
+                netprofit_margin,
+                grossprofit_margin,
+                profit_dedt,
+                gross_margin,
+                op_income
+            FROM stock_fina_indicator
+            {where_clause}
+            ORDER BY ts_code, end_date DESC
+        """
 
-        if row:
-            from types import SimpleNamespace
-            # 解析list_date
-            start_date = None
+        df_current = db.execute(query_current, params).fetchdf()
+
+        if df_current.empty:
+            return pd.DataFrame()
+
+        # 去重：每个股票只保留最新一期数据
+        df_current = df_current.drop_duplicates(subset=['code'], keep='first')
+
+        # 获取去年同期数据用于计算同比增长率
+        # 计算一年前的日期范围
+        if date:
+            if isinstance(date, str):
+                query_date = datetime.strptime(date, '%Y-%m-%d').date()
+            else:
+                query_date = date
+            year_ago_start = (query_date - timedelta(days=400)).strftime('%Y-%m-%d')
+            year_ago_end = (query_date - timedelta(days=300) + timedelta(days=180)).strftime('%Y-%m-%d')
+        else:
+            year_ago_start = (datetime.now() - timedelta(days=400)).strftime('%Y-%m-%d')
+            year_ago_end = (datetime.now() - timedelta(days=300)).strftime('%Y-%m-%d')
+
+        # 获取去年同期数据
+        query_last_year = f"""
+            SELECT
+                ts_code as code,
+                end_date,
+                profit_dedt,
+                gross_margin
+            FROM stock_fina_indicator
+            WHERE ts_code IN ({placeholders if codes else "SELECT ts_code FROM stock_fina_indicator"})
+            AND end_date BETWEEN ? AND ?
+            ORDER BY ts_code, end_date DESC
+        """
+
+        if codes:
+            params_last_year = codes + [year_ago_start, year_ago_end]
+        else:
+            params_last_year = [year_ago_start, year_ago_end]
+
+        df_last_year = db.execute(query_last_year, params_last_year).fetchdf()
+
+        # 计算同比增长率
+        result = df_current.copy()
+
+        # 对每个股票计算同比增长率
+        if not df_last_year.empty:
+            # 按code分组，取每组第一条（最新）
+            df_last_year_grouped = df_last_year.groupby('code').first().reset_index()
+
+            # 合并数据
+            result = result.merge(
+                df_last_year_grouped[['code', 'profit_dedt', 'gross_margin']],
+                on='code',
+                how='left',
+                suffixes=('', '_last_year')
+            )
+
+            # 计算净利润同比增长率
+            result['inc_net_profit_year_on_year'] = np.where(
+                (result['profit_dedt_last_year'] != 0) & (~result['profit_dedt_last_year'].isna()),
+                ((result['profit_dedt'] - result['profit_dedt_last_year']) / abs(result['profit_dedt_last_year'])) * 100,
+                np.nan
+            )
+
+            # 计算营业总收入同比增长率（使用gross_margin作为近似）
+            result['inc_total_revenue_year_on_year'] = np.where(
+                (result['gross_margin_last_year'] != 0) & (~result['gross_margin_last_year'].isna()),
+                ((result['gross_margin'] - result['gross_margin_last_year']) / abs(result['gross_margin_last_year'])) * 100,
+                np.nan
+            )
+        else:
+            # 没有去年同期数据，设为NaN
+            result['inc_net_profit_year_on_year'] = np.nan
+            result['inc_total_revenue_year_on_year'] = np.nan
+
+        # 映射字段名
+        result = result.rename(columns={
+            'roe': 'inc_return',
+            'roe_yearly': 'roe_yearly'
+        })
+
+        # 确保所有需要的字段都存在
+        required_fields = ['code', 'inc_return', 'inc_total_revenue_year_on_year',
+                          'inc_net_profit_year_on_year']
+        for field in required_fields:
+            if field not in result.columns:
+                result[field] = np.nan
+
+        return result
+
+    except Exception as e:
+        log.error(f"get_fundamentals indicator查询失败: {e}")
+        import traceback
+        traceback.print_exc()
+        return pd.DataFrame()
+
+
+# 缓存股票信息，避免重复查询导致DuckDB并发问题
+_security_info_cache = {}
+
+
+def _load_security_info_cache():
+    """预加载所有股票信息到缓存"""
+    global _security_info_cache
+    if _security_info_cache:
+        return
+    try:
+        db = db_manager.get_connection()
+        rows = db.execute(
+            "SELECT ts_code, name, symbol, list_date, industry, market FROM stocks"
+        ).fetchall()
+        from datetime import date as _date
+        from types import SimpleNamespace
+        for row in rows:
+            ts_code = row[0]
+            start_date = _date(2000, 1, 1)
             if row[3]:
                 try:
-                    start_date = datetime.strptime(str(row[3]), '%Y%m%d').date()
+                    if isinstance(row[3], datetime):
+                        start_date = row[3].date() if hasattr(row[3], 'date') else row[3]
+                    elif isinstance(row[3], str):
+                        start_date = datetime.strptime(row[3], '%Y%m%d').date()
+                    else:
+                        start_date = row[3]
                 except:
                     pass
-
-            return SimpleNamespace(
-                code=row[0],
+            _security_info_cache[ts_code] = SimpleNamespace(
+                code=ts_code,
                 display_name=row[1],
                 name=row[1],
                 symbol=row[2],
@@ -765,14 +1300,36 @@ def get_security_info(code):
                 market=row[5]
             )
     except Exception as e:
-        log.error(f"get_security_info失败: {e}")
+        log.error(f"预加载股票信息失败: {e}")
+
+
+def get_security_info(code):
+    """
+    获取证券信息
+
+    Args:
+        code: 股票代码（支持聚宽格式 .XSHG/.XSHE 或 Tushare格式 .SH/.SZ）
+
+    Returns:
+        SimpleNamespace对象，包含display_name, start_date等属性
+    """
+    from datetime import date as _date
+    from types import SimpleNamespace
+
+    # 转换代码格式
+    ts_code = normalize_code(code)
+
+    # 从缓存中查找（避免DuckDB并发问题）
+    _load_security_info_cache()
+    if ts_code in _security_info_cache:
+        return _security_info_cache[ts_code]
 
     # 返回默认值
     return SimpleNamespace(
-        code=code,
-        display_name=code,
-        name=code,
-        start_date=None,
+        code=ts_code,
+        display_name=ts_code,
+        name=ts_code,
+        start_date=_date(2000, 1, 1),
         industry='',
         market=''
     )
@@ -791,18 +1348,25 @@ def run_query(query_obj):
     db = db_manager.get_connection()
 
     # 解析Query对象
-    table = None
-    columns = []
+    table = 'stock_dividend'
+    field_columns = []  # QueryField对象列表
     codes = None
     date_start = None
     date_end = None
 
-    # 提取表和列
+    # a_registration_date = 股权登记日 = record_date (聚宽字段名 -> Tushare字段名)
+    col_map = {
+        'code': 'ts_code',
+        'a_registration_date': 'record_date',
+        'bonus_amount_rmb': 'cash_div'
+    }
+
+    # 提取查询字段
     if hasattr(query_obj, '_entities'):
         for entity in query_obj._entities:
-            if hasattr(entity, 'code'):
-                table = 'stock_dividend'
-                columns = ['ts_code', 'div_date', 'cash_div']
+            if hasattr(entity, 'key'):
+                # 是单个QueryField对象（如finance.STK_XR_XD.code）
+                field_columns.append(entity)
 
     # 解析filter
     if hasattr(query_obj, '_filter'):
@@ -811,6 +1375,11 @@ def run_query(query_obj):
             if hasattr(f, 'left') and hasattr(f.left, 'key'):
                 if f.left.key == 'code' and hasattr(f, 'right'):
                     codes = f.right
+                    # 转换代码格式
+                    if isinstance(codes, list):
+                        codes = normalize_code_list(codes)
+                    elif isinstance(codes, str):
+                        codes = normalize_code(codes)
             # 解析日期范围
             if hasattr(f, 'left') and hasattr(f.left, 'key'):
                 if 'date' in f.left.key.lower():
@@ -820,46 +1389,50 @@ def run_query(query_obj):
                         elif 'le' in str(f.op):
                             date_end = f.right
 
-    # 如果没有解析到，使用默认查询
-    if not columns:
-        columns = ['ts_code', 'div_date', 'cash_div']
-
-    # 构建查询
-    col_map = {
+    # 构建SELECT列
+    # record_date (登记日) 大量为NULL，使用 COALESCE(record_date, ann_date) 作为有效日期
+    col_map_sql = {
         'code': 'ts_code',
-        'a_registration_date': 'base_date',
+        'a_registration_date': 'COALESCE(record_date, ann_date)',
         'bonus_amount_rmb': 'cash_div'
     }
 
-    sql_cols = []
-    for col in columns:
-        if hasattr(col, 'key'):
-            sql_col = col_map.get(col.key, col.key)
-            sql_cols.append(f"{sql_col} as {col.key}")
-        else:
-            sql_cols.append(str(col))
-
-    if not sql_cols:
-        sql_cols = ['ts_code as code', 'base_date as a_registration_date', 'cash_div as bonus_amount_rmb']
+    if field_columns:
+        # 使用指定的QueryField字段
+        sql_cols = []
+        for field in field_columns:
+            db_col = col_map_sql.get(field.key, col_map.get(field.key, field.key))
+            sql_cols.append(f"{db_col} as {field.key}")
+    else:
+        # 默认列（包含所有有用字段）
+        sql_cols = ['ts_code as code', 'COALESCE(record_date, ann_date) as a_registration_date', 'cash_div as bonus_amount_rmb']
 
     query_sql = f"SELECT {', '.join(sql_cols)} FROM stock_dividend WHERE 1=1"
+    # 只查有分红金额的记录
+    query_sql += " AND cash_div > 0"
     params = []
 
     if codes:
+        if len(codes) == 0:
+            return pd.DataFrame()
         placeholders = ','.join(['?' for _ in codes])
         query_sql += f" AND ts_code IN ({placeholders})"
         params.extend(codes)
 
     if date_start:
-        query_sql += " AND base_date >= ?"
+        query_sql += " AND COALESCE(record_date, ann_date) >= ?"
         params.append(date_start)
 
     if date_end:
-        query_sql += " AND base_date <= ?"
+        query_sql += " AND COALESCE(record_date, ann_date) <= ?"
         params.append(date_end)
 
     try:
         df = db.execute(query_sql, params).fetchdf()
+        # 将日期列转为字符串（避免 groupby.sum() 报 datetime64 错误）
+        for col in df.columns:
+            if 'date' in col.lower() and hasattr(df[col], 'dt'):
+                df[col] = df[col].dt.strftime('%Y-%m-%d')
         return df
     except Exception as e:
         log.error(f"run_query执行失败: {e}")
@@ -939,6 +1512,44 @@ def calculate_limit_price(close_price: float, is_st: bool = False,
 # Query构建器 - 模拟聚宽query语法
 # ============================================================================
 
+class QueryExpr:
+    """查询表达式（字段间的算术运算结果）"""
+    def __init__(self, left, op, right):
+        self.left = left
+        self.op = op
+        self.right = right
+        # 用于过滤条件识别
+        self.name = f"({_expr_name(left)} {op} {_expr_name(right)})"
+        self.key = self.name
+        self.table = None
+
+    def __ge__(self, other):
+        return QueryCondition(self, 'ge', other)
+
+    def __le__(self, other):
+        return QueryCondition(self, 'le', other)
+
+    def __gt__(self, other):
+        return QueryCondition(self, 'gt', other)
+
+    def __lt__(self, other):
+        return QueryCondition(self, 'lt', other)
+
+    def __eq__(self, other):
+        return QueryCondition(self, 'eq', other)
+
+    def between(self, low, high):
+        return QueryCondition(self, 'between', (low, high))
+
+
+def _expr_name(e):
+    if isinstance(e, QueryField):
+        return e.name
+    elif isinstance(e, QueryExpr):
+        return e.name
+    return str(e)
+
+
 class QueryField:
     """查询字段"""
     def __init__(self, name, table=None):
@@ -960,6 +1571,30 @@ class QueryField:
 
     def __lt__(self, other):
         return QueryCondition(self, 'lt', other)
+
+    def __truediv__(self, other):
+        return QueryExpr(self, '/', other)
+
+    def __mul__(self, other):
+        return QueryExpr(self, '*', other)
+
+    def __add__(self, other):
+        return QueryExpr(self, '+', other)
+
+    def __sub__(self, other):
+        return QueryExpr(self, '-', other)
+
+    def __rtruediv__(self, other):
+        return QueryExpr(other, '/', self)
+
+    def __rmul__(self, other):
+        return QueryExpr(other, '*', self)
+
+    def __radd__(self, other):
+        return QueryExpr(other, '+', self)
+
+    def __rsub__(self, other):
+        return QueryExpr(other, '-', self)
 
     def between(self, low, high):
         return QueryCondition(self, 'between', (low, high))

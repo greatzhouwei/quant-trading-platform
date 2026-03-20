@@ -255,6 +255,12 @@ class JQStrategyWrapper(bt.Strategy):
         dt = self.data.datetime.datetime(0)
         current_date = dt.date()
 
+        # 对于日线数据（hour=0），模拟聚宽的9:30开盘时间
+        # 聚宽策略通常在 hour==9 and minute==30 时执行交易逻辑
+        if dt.hour == 0 and dt.minute == 0:
+            import datetime as _dt_module
+            dt = _dt_module.datetime.combine(current_date, _dt_module.time(9, 30))
+
         # 更新Context时间（在调用initialize之前）
         context.current_dt = dt
         context.previous_date = self._get_previous_date()
@@ -269,8 +275,15 @@ class JQStrategyWrapper(bt.Strategy):
                 log.error('initialize错误: ' + str(e))
                 return
 
-        # 更新Portfolio
-        self._update_portfolio()
+        # 检测是否是新的一天，若是则调用before_trading_start
+        is_new_day = (self._current_date != current_date)
+        if is_new_day:
+            self._current_date = current_date
+            try:
+                if 'before_trading_start' in globals():
+                    before_trading_start(context)
+            except Exception as e:
+                log.error('before_trading_start错误: ' + str(e))
 
         # 更新Portfolio
         self._update_portfolio()
@@ -336,7 +349,9 @@ class JQStrategyWrapper(bt.Strategy):
         """获取上一个交易日"""
         if len(self.data) > 1:
             return self.data.datetime.date(-1)
-        return None
+        # 回退到当前日期的前一天（避免返回None导致timedelta操作失败）
+        import datetime as _dt
+        return self.data.datetime.date(0) - _dt.timedelta(days=1)
 
     def notify_order(self, order):
         """订单状态通知"""
